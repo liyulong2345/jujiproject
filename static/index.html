@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>面试狙击手</title>
+    <style>
+        /* 你的原有样式，保持不变 */
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f7f9fc; height: 100vh; display: flex; justify-content: center; align-items: center; }
+        #app { max-width: 600px; width: 100%; height: 95vh; background: #ffffff; border-radius: 24px; box-shadow: 0 12px 40px rgba(0,0,0,0.08); display: flex; flex-direction: column; overflow: hidden; position: relative; }
+        header { background: #1e293b; color: white; padding: 18px 24px; font-size: 20px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
+        header .topic { font-size: 14px; font-weight: 400; background: #334155; padding: 4px 12px; border-radius: 20px; }
+        #chat-box { flex: 1; overflow-y: auto; padding: 20px 24px; display: flex; flex-direction: column; gap: 12px; background: #f8fafc; }
+        .message { max-width: 80%; padding: 12px 16px; border-radius: 16px; line-height: 1.5; word-wrap: break-word; white-space: pre-wrap; font-size: 15px; }
+        .message.user { align-self: flex-end; background: #1e293b; color: white; border-bottom-right-radius: 4px; }
+        .message.assistant { align-self: flex-start; background: #e2e8f0; color: #0f172a; border-bottom-left-radius: 4px; }
+        .message.error { align-self: center; background: #fee2e2; color: #b91c1c; border-radius: 8px; font-size: 14px; padding: 8px 16px; }
+        .message .summary-card { background: white; border-radius: 16px; padding: 20px; margin-top: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.06); border: 1px solid #e2e8f0; }
+        .summary-card .prob { font-size: 48px; font-weight: 700; color: #0ea5e9; }
+        .summary-card .comment { margin-top: 8px; color: #334155; }
+        .input-area { display: flex; gap: 8px; padding: 16px 24px; background: white; border-top: 1px solid #e2e8f0; flex-shrink: 0; }
+        .input-area input { flex: 1; padding: 12px 16px; border: 1px solid #cbd5e1; border-radius: 30px; font-size: 15px; outline: none; transition: border 0.2s; }
+        .input-area input:focus { border-color: #1e293b; }
+        .input-area button { padding: 12px 20px; background: #1e293b; color: white; border: none; border-radius: 30px; font-weight: 500; font-size: 15px; cursor: pointer; transition: background 0.2s; white-space: nowrap; }
+        .input-area button:hover { background: #0f172a; }
+        .input-area button:disabled { opacity: 0.5; pointer-events: none; }
+        .action-buttons { display: flex; gap: 8px; padding: 0 24px 16px 24px; background: white; flex-shrink: 0; }
+        .action-buttons button { flex: 1; padding: 10px; border: 1px solid #e2e8f0; background: white; border-radius: 30px; font-size: 14px; cursor: pointer; transition: all 0.2s; color: #1e293b; }
+        .action-buttons button:hover { background: #f1f5f9; }
+        .action-buttons button.end-btn { background: #fef2f2; border-color: #fca5a5; color: #991b1b; }
+        .action-buttons button.end-btn:hover { background: #fee2e2; }
+        .hidden { display: none !important; }
+        #loading { align-self: center; color: #94a3b8; font-size: 14px; padding: 8px; }
+        .card-display { background: white; border-radius: 20px; padding: 24px; box-shadow: 0 8px 24px rgba(0,0,0,0.12); text-align: center; margin: 12px 0; border: 2px solid #e2e8f0; }
+        .card-display .big-prob { font-size: 72px; font-weight: 800; color: #0ea5e9; line-height: 1.2; }
+        .card-display .label { color: #64748b; font-size: 16px; }
+        .card-display .comment-text { margin-top: 12px; font-size: 18px; color: #1e293b; }
+        .card-display .emoji { font-size: 40px; }
+    </style>
+</head>
+<body>
+<div id="app">
+    <header>
+        <span>🎯 面试狙击手</span>
+        <span class="topic" id="topic-display">题目: 未选择</span>
+    </header>
+
+    <div id="chat-box">
+        <div class="message assistant">👋 你好！我是面试官，请选择一道八股文题目开始面试吧。</div>
+        <div id="loading" class="hidden">AI 思考中...</div>
+    </div>
+
+    <div class="input-area">
+        <input type="text" id="msg-input" placeholder="输入你的回答..." />
+        <button id="send-btn">发送</button>
+    </div>
+    <div class="action-buttons">
+        <button id="select-topic-btn">📌 换题</button>
+        <button class="end-btn" id="end-interview-btn">🏁 结束面试</button>
+    </div>
+</div>
+
+<script>
+    const STORAGE_KEY = 'interview_history';
+    const TOPIC_KEY = 'interview_topic';
+
+    let messages = [];
+    let currentTopic = '';
+    let isEnded = false;
+    let isWaiting = false;
+
+    const chatBox = document.getElementById('chat-box');
+    const msgInput = document.getElementById('msg-input');
+    const sendBtn = document.getElementById('send-btn');
+    const topicDisplay = document.getElementById('topic-display');
+    const loadingEl = document.getElementById('loading');
+
+    // ---------- 初始化 ----------
+    function loadState() {
+        const saved = localStorage.getItem(STORAGE_KEY);
+        if (saved) {
+            try { messages = JSON.parse(saved); } catch(e) { messages = []; }
+        } else {
+            messages = [];
+        }
+
+        // 如果消息为空，清除所有缓存
+        if (messages.length === 0) {
+            currentTopic = '';
+            localStorage.removeItem(TOPIC_KEY);
+        } else {
+            currentTopic = localStorage.getItem(TOPIC_KEY) || '';
+        }
+
+        // 检查是否已结束
+        if (messages.length > 0) {
+            const last = messages[messages.length-1];
+            if (last.role === 'assistant' && last.content.includes('"offer_probability"')) {
+                isEnded = true;
+            }
+        }
+
+        updateTopicDisplay();
+        renderMessages();
+    }
+
+    function updateTopicDisplay() {
+        topicDisplay.textContent = currentTopic ? `题目: ${currentTopic}` : '题目: 未选择';
+    }
+
+    function saveState() {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
+        if (currentTopic) {
+            localStorage.setItem(TOPIC_KEY, currentTopic);
+        } else {
+            localStorage.removeItem(TOPIC_KEY);
+        }
+    }
+
+    // ---------- 渲染 ----------
+    function renderMessages() {
+        // 清空除 loading 和欢迎语外的所有元素
+        const children = chatBox.children;
+        for (let i = children.length - 1; i >= 0; i--) {
+            const el = children[i];
+            if (el.id !== 'loading' && !(el.classList.contains('message') && el.innerText.includes('👋 你好！'))) {
+                el.remove();
+            }
+        }
+
+        if (messages.length === 0) {
+            // 无消息，保留欢迎语
+            const welcome = document.createElement('div');
+            welcome.className = 'message assistant';
+            welcome.textContent = '👋 你好！我是面试官，请选择一道八股文题目开始面试吧。';
+            chatBox.prepend(welcome);
+        } else {
+            // 移除多余的欢迎语
+            const first = chatBox.querySelector('.message.assistant');
+            if (first && first.innerText.includes('👋 你好！')) {
+                first.remove();
+            }
+            for (const msg of messages) {
+                appendMessageElement(msg.role, msg.content, false);
+            }
+        }
+        chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+    function appendMessageElement(role, content, saveToHistory = true) {
+        const div = document.createElement('div');
+        div.className = `message ${role}`;
+        if (role === 'assistant' && content.includes('"offer_probability"')) {
+            try {
+                const match = content.match(/\{.*"offer_probability".*\}/s);
+                if (match) {
+                    const data = JSON.parse(match[0]);
+                    div.innerHTML = createCardHTML(data);
+                    isEnded = true;
+                } else {
+                    div.textContent = content;
+                }
+            } catch(e) {
+                div.textContent = content;
+            }
+        } else {
+            div.textContent = content;
+        }
+        chatBox.appendChild(div);
+        chatBox.scrollTop = chatBox.scrollHeight;
+
+        if (saveToHistory) {
+            const last = messages.length > 0 ? messages[messages.length-1] : null;
+            if (!last || last.role !== role || last.content !== content) {
+                messages.push({role, content});
+                saveState();
+            }
+        }
+    }
+
+    function createCardHTML(data) {
+        const prob = data.offer_probability || 0;
+        const comment = data.comment || '继续努力！';
+        const emoji = prob >= 80 ? '🚀' : prob >= 50 ? '😊' : '💪';
+        return `
+            <div class="card-display">
+                <div class="emoji">${emoji}</div>
+                <div class="label">🎯 大厂 Offer 概率</div>
+                <div class="big-prob">${prob}%</div>
+                <div class="comment-text">${comment}</div>
+            </div>
+        `;
+    }
+
+    function addMessage(role, content) {
+        appendMessageElement(role, content, true);
+        if (role === 'assistant' && content.includes('"offer_probability"')) {
+            isEnded = true;
+        }
+    }
+
+    function setLoading(show) {
+        loadingEl.classList.toggle('hidden', !show);
+        sendBtn.disabled = show;
+        isWaiting = show;
+    }
+
+    // ---------- 网络请求 ----------
+    async function sendToBackend(userMessage) {
+        if (!userMessage.trim()) return;
+        if (isEnded) {
+            alert('面试已结束，点击"换题"可重新开始。');
+            return;
+        }
+
+        addMessage('user', userMessage);
+        msgInput.value = '';
+        setLoading(true);
+
+        try {
+            const payload = { messages: messages };
+            if (currentTopic) payload.topic = currentTopic;
+
+            const resp = await fetch('/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await resp.json();
+
+            if (data.error) {
+                addMessage('error', '❌ ' + data.error);
+            } else if (data.reply) {
+                addMessage('assistant', data.reply);
+
+                // 更新题目：优先使用后端返回的 topic
+                if (data.topic) {
+                    currentTopic = data.topic;
+                    updateTopicDisplay();
+                    saveState();
+                } else {
+                    // 备选：从 AI 回复中提取“我选择题目：...”
+                    const match = data.reply.match(/我选择题目[：:]\s*["“]?([^"“”\n]+)["”]?/);
+                    if (match && match[1]) {
+                        currentTopic = match[1].trim();
+                        updateTopicDisplay();
+                        saveState();
+                    }
+                }
+
+                if (data.reply.includes('"offer_probability"')) {
+                    isEnded = true;
+                }
+            }
+        } catch (err) {
+            addMessage('error', '❌ 网络错误: ' + err.message);
+        } finally {
+            setLoading(false);
+        }
+    }
+
+    // ---------- 换题 ----------
+    function changeTopic() {
+        messages = [];
+        localStorage.removeItem(STORAGE_KEY);
+        currentTopic = '';
+        localStorage.removeItem(TOPIC_KEY);
+        isEnded = false;
+        updateTopicDisplay();
+
+        chatBox.innerHTML = '';
+        const welcome = document.createElement('div');
+        welcome.className = 'message assistant';
+        welcome.textContent = '👋 你好！我是面试官，请选择一道八股文题目开始面试吧。';
+        chatBox.appendChild(welcome);
+        chatBox.appendChild(loadingEl);
+        saveState();
+        msgInput.focus();
+    }
+
+    // ---------- 结束面试 ----------
+    function endInterview() {
+        if (isEnded) {
+            alert('面试已结束，如需重新开始请点击"换题"。');
+            return;
+        }
+        if (isWaiting) return;
+        sendToBackend('结束面试');
+    }
+
+    // ---------- 事件绑定 ----------
+    sendBtn.addEventListener('click', () => {
+        const text = msgInput.value.trim();
+        if (text) sendToBackend(text);
+    });
+
+    msgInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            sendBtn.click();
+        }
+    });
+
+    document.getElementById('select-topic-btn').addEventListener('click', changeTopic);
+    document.getElementById('end-interview-btn').addEventListener('click', endInterview);
+
+    // 启动
+    loadState();
+</script>
+</body>
+</html>
