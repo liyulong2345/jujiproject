@@ -10,11 +10,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dashscope import Generation
 
+
 # ---------- RAG 相关导入 ----------
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-
+from langchain.retrievers import EnsembleRetriever
+from langchain_community.retrievers import BM25Retriever
+from langchain.schema import Document
 
 #uvicorn main:app --reload --host 127.0.0.1 --port 8000
 
@@ -33,42 +36,43 @@ if not DASHSCOPE_API_KEY:
 
 # ---------- 1. 全局 RAG 向量库初始化 ----------
 vectorstore = None
+retriever = None  # 混合检索器
 
 def init_rag():
-    global vectorstore
+    global vectorstore, retriever
     file_path = "knowledge.txt"
     if not os.path.exists(file_path):
-        print("警告：未找到 knowledge.txt，RAG 将无法工作")
+        print("警告：未找到 knowledge.txt")
         return
 
     with open(file_path, "r", encoding="utf-8") as f:
         text = f.read()
 
-    # 先按“题目：”分割成独立题目块
+    # 按 "题目：" 分割成独立块
     raw_blocks = text.split("题目: ")
-    # 去掉空块，补回“题目：”
     raw_blocks = ["题目: " + b.strip() for b in raw_blocks if b.strip()]
 
     docs = []
-    # 对每个块再切分（防止单个块太长）
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=100,
-        separators=["\n\n", "\n", "。", "，", " ", ""],
-        length_function=len,
-    )
     for block in raw_blocks:
-        # 如果块长度小于 1000，直接作为一块
-        if len(block) <= 1000:
+        # 如果单块超过 1000 字符，才进一步切分
+        if len(block) <= 1200:
             docs.append(block)
         else:
-            # 否则切分，但尽量保持语义
-            sub_docs = text_splitter.split_text(block)
-            docs.extend(sub_docs)
+            # 用换行和句号切分，保证块内不跨题目
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=800,
+                chunk_overlap=100,
+                separators=["\n\n", "\n", "。", "，", " ", ""],
+            )
+            docs.extend(splitter.split_text(block))
 
-    if not docs:
-        print("警告：knowledge.txt 内容为空或格式不正确")
-        return
+    # 去重（避免重复块）
+    seen = set()
+    unique_docs = []
+    for doc in docs:
+        if doc not in seen:
+            seen.add(doc)
+            unique_docs.append(doc)
 
     embeddings = DashScopeEmbeddings(
         model="text-embedding-v1",
@@ -76,33 +80,83 @@ def init_rag():
     )
 
     vectorstore = Chroma.from_texts(
-        texts=docs,
+        texts=unique_docs,
         embedding=embeddings,
         persist_directory="./chroma_db",
         collection_name="interview_knowledge"
     )
-    # 不需要 persist()
-    print(f"✅ RAG 初始化成功，共切分为 {len(docs)} 个知识块")
+    vector_retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+
+    # 2. BM25 检索器（基于相同文档）
+    bm25_retriever = BM25Retriever.from_texts(unique_docs)
+    bm25_retriever.k = 5
+
+    # 3. 混合检索器（向量权重 0.5，BM25 权重 0.5）
+    retriever = EnsembleRetriever(
+        retrievers=[vector_retriever, bm25_retriever],
+        weights=[0.5, 0.5]
+    )
+    print(f"✅ RAG 初始化成功，共切分为 {len(unique_docs)} 个知识块","混合检索已启动")
 # 启动时立即初始化 RAG
 init_rag()
 
-# ---------- 2. 检索函数（替代原来的关键词匹配） ----------
-def retrieve_knowledge(query: str, top_k: int = 2) -> str:
-    """根据用户输入语义检索最相关的知识块"""
-    global vectorstore
-    if vectorstore is None:
+# ---------- 2. 检索函数(查询改+bm25关键词检索)----------
+# 查询改写
+def expand_query(query: str) -> list:
+    """用 LLM 生成 2 个查询变体（不消耗 Embedding，只消耗普通 LLM token）"""
+    prompt = f"""请将以下技术面试问题改写成 2 个不同角度、但语义相同的问题，用中文分号；分隔。
+原问题：{query}
+改写："""
+    try:
+        response = Generation.call(
+            model='qwen-turbo',  # 用小模型省钱
+            messages=[{"role": "user", "content": prompt}],
+            api_key=DASHSCOPE_API_KEY,
+            temperature=0.3,
+            result_format='message'
+        )
+        if response.status_code == 200:
+            text = response.output.choices[0].message.content
+            # 分割成列表，去掉空字符串
+            variants = [q.strip() for q in text.split("；") if q.strip()]
+            # 最多取 2 个变体，加上原问题
+            print(variants)
+            return [query] + variants[:2]
+    except Exception as e:
+        print(f"查询改写失败: {e}")
+    return [query]  # 失败时回退到原问题
+
+
+# ---------- 叠加后的检索函数 ----------
+def retrieve_knowledge(query: str) -> str:
+    """方案一（查询改写） + 方案三（混合检索）叠加"""
+    global retriever
+    if retriever is None:
         return ""
     try:
-        # 执行向量相似度检索
-        results = vectorstore.similarity_search(query, k=top_k)
-        if results:
-            return "\n\n".join([doc.page_content for doc in results])
+        # 1. 生成多个查询变体（方案一）
+        queries = expand_query(query)
+        print(f"🔍 混合检索查询: {queries}")  # 调试时可看到日志
+
+        # 2. 对每个查询执行混合检索（方案三）
+        all_docs = []
+        seen_contents = set()
+        for q in queries:
+            docs = retriever.invoke(q)  # 这里用的是混合检索器
+            for doc in docs:
+                if doc.page_content not in seen_contents:
+                    seen_contents.add(doc.page_content)
+                    all_docs.append(doc)
+
+        # 3. 如果结果太多，取前 3 个（已经去重）
+        if all_docs:
+            return "\n\n".join([doc.page_content for doc in all_docs[:3]])
         return ""
     except Exception as e:
         print(f"检索出错: {e}")
         return ""
 
-# ---------- 3. 题目选择器（保持不变） ----------
+# ---------- 3. 题目选择器（2） ----------
 DEFAULT_TOPICS = [
     "TCP三次握手", "HTTP状态码", "进程与线程的区别",
     "数据库索引原理", "什么是RESTful API"
