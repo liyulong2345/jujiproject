@@ -2,11 +2,7 @@ fastapi==0.115.0
 uvicorn==0.27.1
 dashscope==1.17.0
 pydantic==2.10.6
-<<<<<<< HEAD
-python-dotenv==1.0.0
-=======
 python-dotenv==1.0.0
 chromadb==0.5.23
 langchain-community==0.3.14
 langchain-text-splitters==0.3.5
->>>>>>> 7bd8fec (feat: 升级 RAG、优化前端换题逻辑、更新依赖)
