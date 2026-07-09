@@ -76,7 +76,7 @@
     const topicDisplay = document.getElementById('topic-display');
     const loadingEl = document.getElementById('loading');
 
-    // ---------- 初始化 ----------
+    // ---------- 核心状态管理 ----------
     function loadState() {
         const saved = localStorage.getItem(STORAGE_KEY);
         if (saved) {
@@ -85,7 +85,7 @@
             messages = [];
         }
 
-        // 如果消息为空，清除所有缓存
+        // 如果历史为空，强制清除 topic 缓存
         if (messages.length === 0) {
             currentTopic = '';
             localStorage.removeItem(TOPIC_KEY);
@@ -103,6 +103,7 @@
 
         updateTopicDisplay();
         renderMessages();
+        console.log('[loadState] currentTopic =', currentTopic);
     }
 
     function updateTopicDisplay() {
@@ -118,9 +119,9 @@
         }
     }
 
-    // ---------- 渲染 ----------
+    // ---------- 渲染消息 ----------
     function renderMessages() {
-        // 清空除 loading 和欢迎语外的所有元素
+        // 清空除 loading 和固定欢迎语外的所有元素
         const children = chatBox.children;
         for (let i = children.length - 1; i >= 0; i--) {
             const el = children[i];
@@ -130,7 +131,7 @@
         }
 
         if (messages.length === 0) {
-            // 无消息，保留欢迎语
+            // 无历史消息，显示欢迎语
             const welcome = document.createElement('div');
             welcome.className = 'message assistant';
             welcome.textContent = '👋 你好！我是面试官，请选择一道八股文题目开始面试吧。';
@@ -219,8 +220,12 @@
         setLoading(true);
 
         try {
+            // 构造请求体：只有当 currentTopic 非空时才添加 topic 字段
             const payload = { messages: messages };
-            if (currentTopic) payload.topic = currentTopic;
+            if (currentTopic && currentTopic.trim() !== '') {
+                payload.topic = currentTopic;
+            }
+            console.log('[sendToBackend] 发送 payload:', payload);
 
             const resp = await fetch('/api/chat', {
                 method: 'POST',
@@ -234,18 +239,20 @@
             } else if (data.reply) {
                 addMessage('assistant', data.reply);
 
-                // 更新题目：优先使用后端返回的 topic
+                // ---------- 关键：强制更新题目 ----------
                 if (data.topic) {
                     currentTopic = data.topic;
                     updateTopicDisplay();
                     saveState();
+                    console.log('[sendToBackend] 更新 topic 为:', currentTopic);
                 } else {
-                    // 备选：从 AI 回复中提取“我选择题目：...”
-                    const match = data.reply.match(/我选择题目[：:]\s*["“]?([^"“”\n]+)["”]?/);
+                    // 理论上后端一定会返回 topic，但万一没有，则从回复中提取
+                    const match = data.reply.match(/面试的题目是[：:]\s*["“]?([^"“”\n，,。]+)["”]?/);
                     if (match && match[1]) {
                         currentTopic = match[1].trim();
                         updateTopicDisplay();
                         saveState();
+                        console.log('[sendToBackend] 从回复提取 topic:', currentTopic);
                     }
                 }
 
@@ -262,21 +269,25 @@
 
     // ---------- 换题 ----------
     function changeTopic() {
+        // 彻底清空所有状态
         messages = [];
         localStorage.removeItem(STORAGE_KEY);
         currentTopic = '';
         localStorage.removeItem(TOPIC_KEY);
         isEnded = false;
         updateTopicDisplay();
+        saveState(); // 确保清除持久化
 
+        // 重置聊天界面
         chatBox.innerHTML = '';
         const welcome = document.createElement('div');
         welcome.className = 'message assistant';
-        welcome.textContent = '👋 你好！我是面试官，请选择一道八股文题目开始面试吧。';
+        welcome.textContent = '👋 已换题，请发送消息开始面试，系统将随机分配题目。';
         chatBox.appendChild(welcome);
         chatBox.appendChild(loadingEl);
-        saveState();
+
         msgInput.focus();
+        console.log('[changeTopic] 已清空所有状态');
     }
 
     // ---------- 结束面试 ----------
